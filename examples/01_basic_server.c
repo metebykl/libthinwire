@@ -4,7 +4,7 @@
 #include "../thinwire.h"
 
 int main() {
-  tw_server_t server;
+  tw_server server;
   if (!tw_server_start(&server)) {
     exit(EXIT_FAILURE);
   };
@@ -12,7 +12,7 @@ int main() {
   tw_log(TW_INFO, "Server listening on port 8080");
 
   while (1) {
-    tw_conn_t conn;
+    tw_conn conn;
     if (!tw_server_accept(&server, &conn)) {
       continue;
     }
@@ -28,7 +28,16 @@ int main() {
     }
 
     buf[bytes_read] = '\0';
-    tw_log(TW_INFO, "%s", buf);
+
+    tw_request req;
+    if (!tw_request_parse(buf, &req)) {
+      tw_log(TW_WARNING, "Failed to parse request");
+      tw_conn_close(&conn);
+      continue;
+    }
+
+    tw_log(TW_INFO, "METHOD: '%s', PATH: '%s', VERSION: '%s'", req.method,
+           req.path, req.version);
 
     const char *response =
         "HTTP/1.1 200 OK\r\n"

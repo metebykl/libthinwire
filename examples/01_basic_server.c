@@ -19,7 +19,7 @@ int main() {
 
     tw_log(TW_INFO, "Client connected");
 
-    char buf[2048];
+    char buf[4096];
     ssize_t bytes_read = tw_conn_read(&conn, buf, sizeof(buf) - 1);
     if (bytes_read <= 0) {
       tw_log(TW_WARNING, "Failed to read buffer");
@@ -36,8 +36,9 @@ int main() {
       continue;
     }
 
-    tw_log(TW_INFO, "METHOD: '%s', PATH: '%s', VERSION: '%s'", req.method,
-           req.path, req.version);
+    tw_log(TW_INFO, "Method: %s, Path: %s", req.method, req.path);
+    const char *host = tw_request_get_header(&req, "Host");
+    if (host) tw_log(TW_INFO, "Host: %s", host);
 
     const char *response =
         "HTTP/1.1 200 OK\r\n"

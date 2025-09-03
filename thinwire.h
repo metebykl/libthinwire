@@ -52,6 +52,15 @@ TWDEF ssize_t tw_conn_read(tw_conn *conn, char *buf, size_t len);
 TWDEF ssize_t tw_conn_write(tw_conn *conn, const char *buf, size_t len);
 TWDEF void tw_conn_close(tw_conn *conn);
 
+#define TW_MAX_HEADERS 64
+#define TW_MAX_HEADER_NAME 256
+#define TW_MAX_HEADER_VALUE 8192
+
+typedef struct {
+  char name[TW_MAX_HEADER_NAME];
+  char value[TW_MAX_HEADER_VALUE];
+} tw_header;
+
 typedef struct {
   char method[64];
   size_t method_len;
@@ -61,9 +70,13 @@ typedef struct {
 
   char path[1024];
   size_t path_len;
+
+  tw_header headers[TW_MAX_HEADERS];
+  size_t header_count;
 } tw_request;
 
 TWDEF bool tw_request_parse(const char *buf, tw_request *req);
+TWDEF const char *tw_request_get_header(tw_request *req, const char *name);
 
 #ifdef __cplusplus
 }
@@ -167,15 +180,17 @@ TWDEF ssize_t tw_conn_write(tw_conn *conn, const char *buf, size_t len) {
 TWDEF void tw_conn_close(tw_conn *conn) { close(conn->fd); };
 
 TWDEF bool tw_request_parse(const char *buf, tw_request *req) {
+  const char *pos = buf;
+
   const char *method_end = strchr(buf, ' ');
   if (!method_end) {
     return false;
   }
-  req->method_len = (size_t)(method_end - buf);
+  req->method_len = (size_t)(method_end - pos);
   if (req->method_len >= sizeof(req->method)) {
     return false;
   }
-  memcpy(req->method, buf, req->method_len);
+  memcpy(req->method, pos, req->method_len);
   req->method[req->method_len] = '\0';
 
   const char *path_start = method_end + 1;
@@ -205,7 +220,45 @@ TWDEF bool tw_request_parse(const char *buf, tw_request *req) {
   memcpy(req->version, version_start, req->version_len);
   req->version[req->version_len] = '\0';
 
+  pos = version_end + 2;
+
+  req->header_count = 0;
+  while (*pos && !(pos[0] == '\r' && pos[1] == '\n')) {
+    if (req->header_count >= TW_MAX_HEADERS) return false;
+
+    const char *colon = strchr(pos, ':');
+    if (!colon) return false;
+
+    size_t name_len = (size_t)(colon - pos);
+    if (name_len >= TW_MAX_HEADER_NAME) return false;
+    memcpy(req->headers[req->header_count].name, pos, name_len);
+    req->headers[req->header_count].name[name_len] = '\0';
+
+    const char *value_start = colon + 1;
+    while (*value_start == ' ') value_start++;
+
+    const char *line_end = strstr(value_start, "\r\n");
+    if (!line_end) return false;
+
+    size_t value_len = (size_t)(line_end - value_start);
+    if (value_len >= TW_MAX_HEADER_VALUE) return false;
+    memcpy(req->headers[req->header_count].value, value_start, value_len);
+    req->headers[req->header_count].value[value_len] = '\0';
+
+    req->header_count++;
+    pos = line_end + 2;
+  }
+
   return true;
+}
+
+TWDEF const char *tw_request_get_header(tw_request *req, const char *name) {
+  for (size_t i = 0; i < req->header_count; i++) {
+    if (strcasecmp(req->headers[i].name, name) == 0) {
+      return req->headers[i].value;
+    }
+  }
+  return NULL;
 }
 
 #endif  // THINWIRE_IMPL

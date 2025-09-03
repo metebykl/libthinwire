@@ -78,6 +78,20 @@ typedef struct {
 TWDEF bool tw_request_parse(const char *buf, tw_request *req);
 TWDEF const char *tw_request_get_header(tw_request *req, const char *name);
 
+typedef struct {
+  int status_code;
+
+  const char *body;
+  size_t body_len;
+
+  tw_header headers[TW_MAX_HEADERS];
+  size_t header_count;
+} tw_response;
+
+TWDEF void tw_response_set_header(tw_response *res, const char *name,
+                                  const char *value);
+TWDEF bool tw_response_send(tw_conn *conn, tw_response *res);
+
 #ifdef __cplusplus
 }
 #endif
@@ -259,6 +273,104 @@ TWDEF const char *tw_request_get_header(tw_request *req, const char *name) {
     }
   }
   return NULL;
+}
+
+TWDEF void tw_response_set_header(tw_response *res, const char *name,
+                                  const char *value) {
+  if (res->header_count >= TW_MAX_HEADERS) {
+    tw_log(TW_WARNING, "Cannot set header, max headers reached.");
+    return;
+  }
+
+  size_t name_len = strlen(name);
+  if (name_len >= TW_MAX_HEADER_NAME) {
+    tw_log(TW_WARNING, "Header name too long.");
+    return;
+  }
+
+  size_t value_len = strlen(value);
+  if (value_len >= TW_MAX_HEADER_VALUE) {
+    tw_log(TW_WARNING, "Header value too long.");
+    return;
+  }
+
+  for (size_t i = 0; i < res->header_count; i++) {
+    if (strcasecmp(res->headers[i].name, name) == 0) {
+      strcpy(res->headers[i].value, value);
+      return;
+    }
+  }
+
+  strcpy(res->headers[res->header_count].name, name);
+  strcpy(res->headers[res->header_count].value, value);
+  res->header_count++;
+}
+
+static const char *tw_get_status_message(int status_code) {
+  switch (status_code) {
+    case 100:
+      return "Continue";
+    case 200:
+      return "OK";
+    case 201:
+      return "Created";
+    case 204:
+      return "No Content";
+    case 301:
+      return "Moved Permanently";
+    case 302:
+      return "Found";
+    case 400:
+      return "Bad Request";
+    case 401:
+      return "Unauthorized";
+    case 403:
+      return "Forbidden";
+    case 404:
+      return "Not Found";
+    case 500:
+      return "Internal Server Error";
+    case 502:
+      return "Bad Gateway";
+    case 503:
+      return "Service Unavailable";
+    default:
+      return "Unknown Status";
+  }
+}
+
+TWDEF bool tw_response_send(tw_conn *conn, tw_response *res) {
+  char header_buf[TW_MAX_HEADER_VALUE * 2];
+  int offset = 0;
+
+  const char *status_message = tw_get_status_message(res->status_code);
+  offset += snprintf(header_buf + offset, sizeof(header_buf) - offset,
+                     "HTTP/1.1 %d %s\r\n", res->status_code, status_message);
+
+  offset += snprintf(header_buf + offset, sizeof(header_buf) - offset,
+                     "Content-Length: %zu\r\n", res->body_len);
+
+  for (size_t i = 0; i < res->header_count; i++) {
+    offset +=
+        snprintf(header_buf + offset, sizeof(header_buf) - offset, "%s: %s\r\n",
+                 res->headers[i].name, res->headers[i].value);
+  }
+
+  offset += snprintf(header_buf + offset, sizeof(header_buf) - offset, "\r\n");
+
+  if (tw_conn_write(conn, header_buf, offset) < 0) {
+    tw_log(TW_ERROR, "Failed to send response headers");
+    return false;
+  }
+
+  if (res->body && res->body_len > 0) {
+    if (tw_conn_write(conn, res->body, res->body_len) < 0) {
+      tw_log(TW_ERROR, "Failed to send response body");
+      return false;
+    }
+  }
+
+  return true;
 }
 
 #endif  // THINWIRE_IMPL

@@ -40,14 +40,27 @@ int main() {
     const char *host = tw_request_get_header(&req, "Host");
     if (host) tw_log(TW_INFO, "Host: %s", host);
 
-    const char *response =
-        "HTTP/1.1 200 OK\r\n"
-        "Content-Type: text/plain\r\n"
-        "Content-Length: 12\r\n"
-        "\r\n"
-        "Hello World!";
+    if (strcmp(req.path, "/") != 0) {
+      tw_response res = {0};
+      res.status_code = 404;
+      if (!tw_response_send(&conn, &res)) {
+        tw_log(TW_WARNING, "Failed to send response");
+      }
+      tw_conn_close(&conn);
+      continue;
+    }
 
-    tw_conn_write(&conn, response, strlen(response));
+    tw_response res = {0};
+    res.status_code = 200;
+    res.body = "Hello World!";
+    res.body_len = strlen(res.body);
+
+    tw_response_set_header(&res, "Content-Type", "text/plain");
+
+    if (!tw_response_send(&conn, &res)) {
+      tw_log(TW_WARNING, "Failed to send response");
+    }
+
     tw_conn_close(&conn);
   }
 

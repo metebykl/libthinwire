@@ -1,5 +1,3 @@
-#include <stdio.h>
-
 #define THINWIRE_IMPL
 #include "../thinwire.h"
 

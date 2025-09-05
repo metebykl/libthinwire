@@ -35,8 +35,13 @@ typedef enum { TW_INFO, TW_WARNING, TW_ERROR } tw_log_level;
 
 TWDEF void tw_log(tw_log_level level, const char *fmt, ...);
 
+#ifndef TW_DEFAULT_PORT
 #define TW_DEFAULT_PORT 8080
+#endif
+
+#ifndef TW_MAX_CLIENTS
 #define TW_MAX_CLIENTS 100
+#endif
 
 typedef struct {
   int fd;
@@ -52,14 +57,26 @@ typedef struct {
   int nfds;
 } tw_server;
 
+#ifndef TW_MAX_HEADERS
 #define TW_MAX_HEADERS 64
+#endif
+
+#ifndef TW_MAX_HEADER_NAME
 #define TW_MAX_HEADER_NAME 256
+#endif
+
+#ifndef TW_MAX_HEADER_VALUE
 #define TW_MAX_HEADER_VALUE 8192
+#endif
 
 typedef struct {
   char name[TW_MAX_HEADER_NAME];
   char value[TW_MAX_HEADER_VALUE];
 } tw_header;
+
+#ifndef TW_MAX_REQUEST_SIZE
+#define TW_MAX_REQUEST_SIZE 8192
+#endif
 
 typedef struct {
   char method[64];
@@ -91,7 +108,6 @@ typedef void (*tw_request_handler_fn)(tw_conn *conn, tw_request *req,
 TWDEF bool tw_server_start(tw_server *server);
 TWDEF bool tw_server_run(tw_server *server, tw_request_handler_fn handler);
 TWDEF bool tw_server_stop(tw_server *server);
-TWDEF bool tw_server_accept(tw_server *server, tw_conn *conn);
 TWDEF bool tw__set_nonblocking(int fd);
 
 TWDEF ssize_t tw_conn_read(tw_conn *conn, char *buf, size_t len);
@@ -311,18 +327,6 @@ TWDEF bool tw_server_stop(tw_server *server) {
 #ifdef _WIN32
   WSACleanup();
 #endif
-
-  return true;
-}
-
-TWDEF bool tw_server_accept(tw_server *server, tw_conn *conn) {
-  socklen_t addr_len = sizeof(conn->addr);
-
-  if ((conn->fd =
-           accept(server->fd, (struct sockaddr *)&conn->addr, &addr_len)) < 0) {
-    tw_log(TW_ERROR, "Accept failed");
-    return false;
-  }
 
   return true;
 }

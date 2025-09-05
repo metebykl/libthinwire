@@ -13,7 +13,6 @@ void handle_request(tw_conn *conn, tw_request *req, tw_response *res) {
     return;
   }
 
-  res->status_code = 200;
   res->body = "Hello World!";
   res->body_len = strlen(res->body);
   tw_response_set_header(res, "Content-Type", "text/plain");

@@ -90,6 +90,8 @@ typedef struct {
 
   tw_header headers[TW_MAX_HEADERS];
   size_t header_count;
+
+  bool keep_alive;
 } tw_request;
 
 typedef struct {
@@ -251,44 +253,68 @@ TWDEF bool tw_server_run(tw_server *server, tw_request_handler_fn handler) {
     for (int i = 1; i < server->nfds; i++) {
       tw_conn *conn = &server->conns[i];
       short revents = server->fds[i].revents;
-      bool needs_close = false;
 
-      if (revents & POLLIN) {
-        char buf[8192];
+      if (!(revents & POLLIN)) {
+        if (revents & (POLLHUP | POLLERR | POLLNVAL)) {
+          tw_conn_close(conn);
+#ifdef _WIN32
+          server->fds[i].fd = (SOCKET)-1;
+#else
+          server->fds[i].fd = -1;
+#endif
+          conn->fd = -1;
+        }
+        server->fds[i].revents = 0;
+        continue;
+      }
+
+      bool keep_alive = true;
+      while (keep_alive) {
+        char buf[TW_MAX_REQUEST_SIZE];
         ssize_t bytes_read = tw_conn_read(conn, buf, sizeof(buf) - 1);
-        if (bytes_read > 0) {
-          buf[bytes_read] = '\0';
-
-          tw_request req;
-          if (tw_request_parse(buf, &req)) {
-            tw_response res = {0};
-            res.status_code = 200;
-            handler(conn, &req, &res);
-          } else {
-            tw_response res = {0};
-            res.status_code = 400;
-            const char *body = "Bad Request";
-            res.body = body;
-            res.body_len = strlen(body);
-            tw_response_send(conn, &res);
-          }
+        if (bytes_read <= 0) {
+          keep_alive = false;
+          break;
         }
 
-        needs_close = true;
-      }
+        buf[bytes_read] = '\0';
 
-      if (revents & (POLLHUP | POLLERR | POLLNVAL)) {
-        needs_close = true;
-      }
+        tw_request req;
+        if (!tw_request_parse(buf, &req)) {
+          tw_response res = {0};
+          res.status_code = 400;
 
-      if (needs_close) {
-        tw_conn_close(conn);
+          const char *body = "Bad Request";
+          res.body = body;
+          res.body_len = strlen(body);
+
+          tw_response_send(conn, &res);
+          keep_alive = false;
+          break;
+        }
+
+        tw_response res = {0};
+        res.status_code = 200;
+
+        if (req.keep_alive) {
+          tw_response_set_header(&res, "Connection", "keep-alive");
+        } else {
+          tw_response_set_header(&res, "Connection", "close");
+          keep_alive = false;
+        }
+
+        handler(conn, &req, &res);
+
+        if (!keep_alive) {
+          tw_conn_close(conn);
 #ifdef _WIN32
-        server->fds[i].fd = (SOCKET)-1;
+          server->fds[i].fd = (SOCKET)-1;
 #else
-        server->fds[i].fd = -1;
+          server->fds[i].fd = -1;
 #endif
-        conn->fd = -1;
+          conn->fd = -1;
+          break;
+        }
       }
 
       server->fds[i].revents = 0;
@@ -432,6 +458,18 @@ TWDEF bool tw_request_parse(const char *buf, tw_request *req) {
 
     req->header_count++;
     pos = line_end + 2;
+  }
+
+  req->keep_alive = false;
+
+  const char *conn_hdr = tw_request_get_header(req, "Connection");
+  if (conn_hdr) {
+    if (strcasecmp(conn_hdr, "keep-alive") == 0) {
+      req->keep_alive = true;
+    }
+  } else if (strcmp(req->version, "HTTP/1.1") == 0) {
+    // HTTP/1.1 defaults to keep-alive
+    req->keep_alive = true;
   }
 
   return true;

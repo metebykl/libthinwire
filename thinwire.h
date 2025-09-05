@@ -18,6 +18,7 @@ extern "C" {
 #else
 #include <arpa/inet.h>
 #include <netinet/in.h>
+#include <poll.h>
 #include <sys/socket.h>
 #include <sys/types.h>
 #include <unistd.h>
@@ -26,6 +27,8 @@ extern "C" {
 #ifdef _WIN32
 typedef int socklen_t;
 #define close(fd) closesocket(fd)
+
+#define poll(fds, nfds, timeout) WSAPoll(fds, nfds, timeout)
 #endif
 
 typedef enum { TW_INFO, TW_WARNING, TW_ERROR } tw_log_level;
@@ -33,24 +36,21 @@ typedef enum { TW_INFO, TW_WARNING, TW_ERROR } tw_log_level;
 TWDEF void tw_log(tw_log_level level, const char *fmt, ...);
 
 #define TW_DEFAULT_PORT 8080
-
-typedef struct {
-  int fd;
-  struct sockaddr_in addr;
-} tw_server;
+#define TW_MAX_CLIENTS 100
 
 typedef struct {
   int fd;
   struct sockaddr_in addr;
 } tw_conn;
 
-TWDEF bool tw_server_start(tw_server *server);
-TWDEF bool tw_server_stop(tw_server *server);
-TWDEF bool tw_server_accept(tw_server *server, tw_conn *conn);
+typedef struct {
+  int fd;
+  struct sockaddr_in addr;
 
-TWDEF ssize_t tw_conn_read(tw_conn *conn, char *buf, size_t len);
-TWDEF ssize_t tw_conn_write(tw_conn *conn, const char *buf, size_t len);
-TWDEF void tw_conn_close(tw_conn *conn);
+  struct pollfd fds[TW_MAX_CLIENTS + 1];
+  tw_conn conns[TW_MAX_CLIENTS + 1];
+  int nfds;
+} tw_server;
 
 #define TW_MAX_HEADERS 64
 #define TW_MAX_HEADER_NAME 256
@@ -75,9 +75,6 @@ typedef struct {
   size_t header_count;
 } tw_request;
 
-TWDEF bool tw_request_parse(const char *buf, tw_request *req);
-TWDEF const char *tw_request_get_header(tw_request *req, const char *name);
-
 typedef struct {
   int status_code;
 
@@ -87,6 +84,22 @@ typedef struct {
   tw_header headers[TW_MAX_HEADERS];
   size_t header_count;
 } tw_response;
+
+typedef void (*tw_request_handler_fn)(tw_conn *conn, tw_request *req,
+                                      tw_response *res);
+
+TWDEF bool tw_server_start(tw_server *server);
+TWDEF bool tw_server_run(tw_server *server, tw_request_handler_fn handler);
+TWDEF bool tw_server_stop(tw_server *server);
+TWDEF bool tw_server_accept(tw_server *server, tw_conn *conn);
+TWDEF bool tw__set_nonblocking(int fd);
+
+TWDEF ssize_t tw_conn_read(tw_conn *conn, char *buf, size_t len);
+TWDEF ssize_t tw_conn_write(tw_conn *conn, const char *buf, size_t len);
+TWDEF void tw_conn_close(tw_conn *conn);
+
+TWDEF bool tw_request_parse(const char *buf, tw_request *req);
+TWDEF const char *tw_request_get_header(tw_request *req, const char *name);
 
 TWDEF void tw_response_set_header(tw_response *res, const char *name,
                                   const char *value);
@@ -154,6 +167,139 @@ TWDEF bool tw_server_start(tw_server *server) {
     return false;
   }
 
+  if (!tw__set_nonblocking(server->fd)) {
+    return false;
+  }
+
+  server->nfds = 1;
+  memset(server->fds, 0, sizeof(server->fds));
+  server->fds[0].fd = server->fd;
+  server->fds[0].events = POLLIN;
+
+  return true;
+}
+
+TWDEF bool tw_server_run(tw_server *server, tw_request_handler_fn handler) {
+  while (1) {
+    int ret = poll(server->fds, server->nfds, -1);
+    if (ret < 0) {
+      tw_log(TW_ERROR, "Poll failed");
+      return false;
+    }
+
+    if (server->fds[0].revents & (POLLIN | POLLERR | POLLHUP)) {
+      while (server->nfds < TW_MAX_CLIENTS + 1) {
+        tw_conn conn;
+        socklen_t addr_len = sizeof(conn.addr);
+#ifdef _WIN32
+        SOCKET conn_fd =
+            accept(server->fd, (struct sockaddr *)&conn.addr, &addr_len);
+        if (conn_fd == INVALID_SOCKET) {
+          int werr = WSAGetLastError();
+          if (werr == WSAEWOULDBLOCK) {
+            /* no more pending connections */
+            break;
+          } else {
+            tw_log(TW_ERROR, "accept failed: %d", werr);
+            break;
+          }
+        }
+        conn.fd = (int)conn_fd;
+#else
+        int conn_fd =
+            accept(server->fd, (struct sockaddr *)&conn.addr, &addr_len);
+        if (conn_fd < 0) {
+          if (errno == EAGAIN || errno == EWOULDBLOCK) {
+            /* no more pending connections */
+            break;
+          } else {
+            tw_log(TW_ERROR, "accept failed: %s", strerror(errno));
+            break;
+          }
+        }
+        conn.fd = conn_fd;
+#endif
+
+        tw__set_nonblocking(conn_fd);
+
+        server->conns[server->nfds] = conn;
+        server->fds[server->nfds].fd = conn_fd;
+        server->fds[server->nfds].events = POLLIN;
+        server->fds[server->nfds].revents = 0;
+        server->nfds++;
+      }
+
+      server->fds[0].revents = 0;
+    }
+
+    for (int i = 1; i < server->nfds; i++) {
+      tw_conn *conn = &server->conns[i];
+      short revents = server->fds[i].revents;
+      bool needs_close = false;
+
+      if (revents & POLLIN) {
+        char buf[8192];
+        ssize_t bytes_read = tw_conn_read(conn, buf, sizeof(buf) - 1);
+        if (bytes_read > 0) {
+          buf[bytes_read] = '\0';
+
+          tw_request req;
+          if (tw_request_parse(buf, &req)) {
+            tw_response res = {0};
+            res.status_code = 200;
+            handler(conn, &req, &res);
+          } else {
+            tw_response res = {0};
+            res.status_code = 400;
+            const char *body = "Bad Request";
+            res.body = body;
+            res.body_len = strlen(body);
+            tw_response_send(conn, &res);
+          }
+        }
+
+        needs_close = true;
+      }
+
+      if (revents & (POLLHUP | POLLERR | POLLNVAL)) {
+        needs_close = true;
+      }
+
+      if (needs_close) {
+        tw_conn_close(conn);
+#ifdef _WIN32
+        server->fds[i].fd = (SOCKET)-1;
+#else
+        server->fds[i].fd = -1;
+#endif
+        conn->fd = -1;
+      }
+
+      server->fds[i].revents = 0;
+    }
+
+    int current = 1;
+    for (int i = 1; i < server->nfds; i++) {
+#ifdef _WIN32
+      if (server->fds[i].fd != (SOCKET)-1) {
+#else
+      if (server->fds[i].fd != -1) {
+#endif
+        if (current != i) {
+          server->fds[current] = server->fds[i];
+          server->conns[current] = server->conns[i];
+        }
+        current++;
+      } else {
+        server->fds[i].events = 0;
+        server->fds[i].revents = 0;
+        server->conns[i].fd = -1;
+      }
+    }
+
+    server->nfds = current;
+  }
+
   return true;
 }
 
@@ -178,6 +324,27 @@ TWDEF bool tw_server_accept(tw_server *server, tw_conn *conn) {
     return false;
   }
 
+  return true;
+}
+
+TWDEF bool tw__set_nonblocking(int fd) {
+#ifdef _WIN32
+  DWORD mode = 1;
+  if (ioctlsocket(fd, FIONBIO, &mode) != 0) {
+    tw_log(TW_ERROR, "ioctlsocket failed");
+    return false;
+  }
+#else
+  int flags = fcntl(fd, F_GETFL, 0);
+  if (flags == -1) {
+    tw_log(TW_ERROR, "fcntl(F_GETFL) failed");
+    return false;
+  }
+  if (fcntl(fd, F_SETFL, flags | O_NONBLOCK) == -1) {
+    tw_log(TW_ERROR, "fcntl(F_SETFL) failed");
+    return false;
+  }
+#endif
   return true;
 }
 

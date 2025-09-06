@@ -107,7 +107,7 @@ typedef struct {
 typedef void (*tw_request_handler_fn)(tw_conn *conn, tw_request *req,
                                       tw_response *res);
 
-TWDEF bool tw_server_start(tw_server *server);
+TWDEF bool tw_server_init(tw_server *server, int port);
 TWDEF bool tw_server_run(tw_server *server, tw_request_handler_fn handler);
 TWDEF bool tw_server_stop(tw_server *server);
 TWDEF bool tw__set_nonblocking(int fd);
@@ -156,7 +156,7 @@ TWDEF void tw_log(tw_log_level level, const char *fmt, ...) {
   fprintf(stream, "\n");
 }
 
-TWDEF bool tw_server_start(tw_server *server) {
+TWDEF bool tw_server_init(tw_server *server, int port) {
 #ifdef _WIN32
   WSADATA wsa;
   if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0) {
@@ -170,9 +170,13 @@ TWDEF bool tw_server_start(tw_server *server) {
     return false;
   }
 
+  if (port <= 0) {
+    port = TW_DEFAULT_PORT;
+  }
+
   server->addr.sin_family = AF_INET;
   server->addr.sin_addr.s_addr = INADDR_ANY;
-  server->addr.sin_port = htons(TW_DEFAULT_PORT);
+  server->addr.sin_port = htons(port);
 
   if (bind(server->fd, (struct sockaddr *)&server->addr, sizeof(server->addr)) <
       0) {

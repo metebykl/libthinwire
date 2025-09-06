@@ -1,11 +1,10 @@
 #define THINWIRE_IMPL
 #include "../thinwire.h"
 
+#define PORT 8080
+
 void handle_request(tw_conn *conn, tw_request *req, tw_response *res) {
   tw_log(TW_INFO, "Method: %s, Path: %s", req->method, req->path);
-
-  const char *host = tw_request_get_header(req, "Host");
-  if (host) tw_log(TW_INFO, "Host: %s", host);
 
   if (strcmp(req->path, "/") != 0) {
     res->status_code = 404;
@@ -22,11 +21,11 @@ void handle_request(tw_conn *conn, tw_request *req, tw_response *res) {
 
 int main() {
   tw_server server;
-  if (!tw_server_start(&server)) {
+  if (!tw_server_init(&server, PORT)) {
     exit(EXIT_FAILURE);
   };
 
-  tw_log(TW_INFO, "Server listening on port 8080");
+  tw_log(TW_INFO, "Server listening on port %d", PORT);
   tw_server_run(&server, handle_request);
 
   tw_server_stop(&server);

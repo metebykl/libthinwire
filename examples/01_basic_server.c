@@ -4,17 +4,16 @@
 #define PORT 8080
 
 void handle_request(tw_conn *conn, tw_request *req, tw_response *res) {
-  tw_log(TW_INFO, "Method: %s, Path: %s", req->method, req->path);
-
   if (strcmp(req->path, "/") != 0) {
-    res->status_code = 404;
+    tw_response_set_status(res, 404);
     tw_response_send(conn, res);
     return;
   }
 
-  res->body = "Hello World!";
-  res->body_len = strlen(res->body);
+  const char *message = "Hello World!";
+  tw_response_set_status(res, 200);
   tw_response_set_header(res, "Content-Type", "text/plain");
+  tw_response_set_body(res, message, strlen(message));
 
   tw_response_send(conn, res);
 }

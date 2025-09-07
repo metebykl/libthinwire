@@ -119,8 +119,11 @@ TWDEF void tw_conn_close(tw_conn *conn);
 TWDEF bool tw_request_parse(const char *buf, tw_request *req);
 TWDEF const char *tw_request_get_header(tw_request *req, const char *name);
 
+TWDEF void tw_response_set_status(tw_response *res, int status_code);
 TWDEF void tw_response_set_header(tw_response *res, const char *name,
                                   const char *value);
+TWDEF void tw_response_set_body(tw_response *res, const char *body,
+                                size_t body_len);
 TWDEF bool tw_response_send(tw_conn *conn, tw_response *res);
 
 #ifdef __cplusplus
@@ -488,6 +491,10 @@ TWDEF const char *tw_request_get_header(tw_request *req, const char *name) {
   return NULL;
 }
 
+TWDEF void tw_response_set_status(tw_response *res, int status_code) {
+  res->status_code = status_code;
+}
+
 TWDEF void tw_response_set_header(tw_response *res, const char *name,
                                   const char *value) {
   if (res->header_count >= TW_MAX_HEADERS) {
@@ -550,6 +557,12 @@ static const char *tw_get_status_message(int status_code) {
     default:
       return "Unknown Status";
   }
+}
+
+TWDEF void tw_response_set_body(tw_response *res, const char *body,
+                                size_t body_len) {
+  res->body = body;
+  res->body_len = body_len;
 }
 
 TWDEF bool tw_response_send(tw_conn *conn, tw_response *res) {

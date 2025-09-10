@@ -11,6 +11,7 @@ extern "C" {
 
 #include <stdarg.h>
 #include <stdbool.h>
+#include <stdint.h>
 #include <stdio.h>
 
 #ifdef _WIN32
@@ -78,6 +79,10 @@ typedef struct {
 #define TW_MAX_REQUEST_SIZE 8192
 #endif
 
+#ifndef TW_MAX_REQUEST_BODY
+#define TW_MAX_REQUEST_BODY (128 * 1024 * 1024)
+#endif
+
 typedef struct {
   char method[64];
   size_t method_len;
@@ -92,6 +97,9 @@ typedef struct {
   size_t header_count;
 
   bool keep_alive;
+
+  char *body;
+  size_t body_len;
 } tw_request;
 
 typedef struct {
@@ -116,8 +124,17 @@ TWDEF ssize_t tw_conn_read(tw_conn *conn, char *buf, size_t len);
 TWDEF ssize_t tw_conn_write(tw_conn *conn, const char *buf, size_t len);
 TWDEF void tw_conn_close(tw_conn *conn);
 
-TWDEF bool tw_request_parse(const char *buf, tw_request *req);
+typedef enum {
+  TW_REQUEST_PARSE_SUCCESS = 0,
+  TW_REQUEST_PARSE_ERROR = 1,
+  TW_REQUEST_PARSE_BLOCK = 2
+} tw_request_parse_result;
+
+TWDEF tw_request_parse_result tw_request_parse(tw_conn *conn, tw_request *req);
+TWDEF tw_request_parse_result tw_request_parse_body(tw_conn *conn,
+                                                    tw_request *req);
 TWDEF const char *tw_request_get_header(tw_request *req, const char *name);
+TWDEF void tw_request_free(tw_request *req);
 
 TWDEF void tw_response_set_status(tw_response *res, int status_code);
 TWDEF void tw_response_set_header(tw_response *res, const char *name,
@@ -277,17 +294,10 @@ TWDEF bool tw_server_run(tw_server *server, tw_request_handler_fn handler) {
 
       bool keep_alive = true;
       while (keep_alive) {
-        char buf[TW_MAX_REQUEST_SIZE];
-        ssize_t bytes_read = tw_conn_read(conn, buf, sizeof(buf) - 1);
-        if (bytes_read <= 0) {
-          keep_alive = false;
-          break;
-        }
-
-        buf[bytes_read] = '\0';
-
         tw_request req;
-        if (!tw_request_parse(buf, &req)) {
+        tw_request_parse_result req_parse_result = tw_request_parse(conn, &req);
+
+        if (req_parse_result == TW_REQUEST_PARSE_ERROR) {
           tw_response res = {0};
           res.status_code = 400;
 
@@ -296,6 +306,11 @@ TWDEF bool tw_server_run(tw_server *server, tw_request_handler_fn handler) {
           res.body_len = strlen(body);
 
           tw_response_send(conn, &res);
+          tw_request_free(&req);
+          keep_alive = false;
+          break;
+        } else if (req_parse_result == TW_REQUEST_PARSE_BLOCK) {
+          // No data available yet
           keep_alive = false;
           break;
         }
@@ -311,6 +326,8 @@ TWDEF bool tw_server_run(tw_server *server, tw_request_handler_fn handler) {
         }
 
         handler(conn, &req, &res);
+
+        tw_request_free(&req);
 
         if (!keep_alive) {
           tw_conn_close(conn);
@@ -397,16 +414,51 @@ TWDEF ssize_t tw_conn_write(tw_conn *conn, const char *buf, size_t len) {
 
 TWDEF void tw_conn_close(tw_conn *conn) { close(conn->fd); };
 
-TWDEF bool tw_request_parse(const char *buf, tw_request *req) {
+TWDEF tw_request_parse_result tw_request_parse(tw_conn *conn, tw_request *req) {
+  char buf[TW_MAX_REQUEST_SIZE];
+  ssize_t bytes_read = 0;
+  ssize_t total_read = 0;
+  const char *headers_end = NULL;
+
+  while (total_read < TW_MAX_REQUEST_SIZE - 1) {
+    bytes_read = tw_conn_read(conn, buf + total_read,
+                              TW_MAX_REQUEST_SIZE - total_read - 1);
+    if (bytes_read <= 0) {
+#ifdef _WIN32
+      if (WSAGetLastError() == WSAEWOULDBLOCK) {
+        return TW_REQUEST_PARSE_BLOCK;
+      }
+#else
+      if (errno == EAGAIN || errno == EWOULDBLOCK) {
+        return TW_REQUEST_PARSE_BLOCK;
+      }
+#endif
+      return TW_REQUEST_PARSE_ERROR;
+    }
+
+    total_read += bytes_read;
+    buf[total_read] = '\0';
+
+    headers_end = strstr(buf, "\r\n\r\n");
+    if (headers_end) {
+      break;
+    }
+  }
+
+  if (!headers_end) {
+    // Headers too large or malformed
+    return TW_REQUEST_PARSE_ERROR;
+  }
+
   const char *pos = buf;
 
   const char *method_end = strchr(buf, ' ');
   if (!method_end) {
-    return false;
+    return TW_REQUEST_PARSE_ERROR;
   }
   req->method_len = (size_t)(method_end - pos);
   if (req->method_len >= sizeof(req->method)) {
-    return false;
+    return TW_REQUEST_PARSE_ERROR;
   }
   memcpy(req->method, pos, req->method_len);
   req->method[req->method_len] = '\0';
@@ -414,11 +466,11 @@ TWDEF bool tw_request_parse(const char *buf, tw_request *req) {
   const char *path_start = method_end + 1;
   const char *path_end = strchr(path_start, ' ');
   if (!path_end) {
-    return false;
+    return TW_REQUEST_PARSE_ERROR;
   }
   req->path_len = (size_t)(path_end - path_start);
   if (req->path_len >= sizeof(req->path)) {
-    return false;
+    return TW_REQUEST_PARSE_ERROR;
   }
   memcpy(req->path, path_start, req->path_len);
   req->path[req->path_len] = '\0';
@@ -428,12 +480,12 @@ TWDEF bool tw_request_parse(const char *buf, tw_request *req) {
   if (!version_end) {
     version_end = strchr(version_start, '\n');
     if (!version_end) {
-      return false;
+      return TW_REQUEST_PARSE_ERROR;
     }
   }
   req->version_len = (size_t)(version_end - version_start);
   if (req->version_len >= sizeof(req->version)) {
-    return false;
+    return TW_REQUEST_PARSE_ERROR;
   }
   memcpy(req->version, version_start, req->version_len);
   req->version[req->version_len] = '\0';
@@ -442,13 +494,13 @@ TWDEF bool tw_request_parse(const char *buf, tw_request *req) {
 
   req->header_count = 0;
   while (*pos && !(pos[0] == '\r' && pos[1] == '\n')) {
-    if (req->header_count >= TW_MAX_HEADERS) return false;
+    if (req->header_count >= TW_MAX_HEADERS) return TW_REQUEST_PARSE_ERROR;
 
     const char *colon = strchr(pos, ':');
-    if (!colon) return false;
+    if (!colon) return TW_REQUEST_PARSE_ERROR;
 
     size_t name_len = (size_t)(colon - pos);
-    if (name_len >= TW_MAX_HEADER_NAME) return false;
+    if (name_len >= TW_MAX_HEADER_NAME) return TW_REQUEST_PARSE_ERROR;
     memcpy(req->headers[req->header_count].name, pos, name_len);
     req->headers[req->header_count].name[name_len] = '\0';
 
@@ -456,10 +508,10 @@ TWDEF bool tw_request_parse(const char *buf, tw_request *req) {
     while (*value_start == ' ') value_start++;
 
     const char *line_end = strstr(value_start, "\r\n");
-    if (!line_end) return false;
+    if (!line_end) return TW_REQUEST_PARSE_ERROR;
 
     size_t value_len = (size_t)(line_end - value_start);
-    if (value_len >= TW_MAX_HEADER_VALUE) return false;
+    if (value_len >= TW_MAX_HEADER_VALUE) return TW_REQUEST_PARSE_ERROR;
     memcpy(req->headers[req->header_count].value, value_start, value_len);
     req->headers[req->header_count].value[value_len] = '\0';
 
@@ -479,7 +531,91 @@ TWDEF bool tw_request_parse(const char *buf, tw_request *req) {
     req->keep_alive = true;
   }
 
-  return true;
+  size_t header_bytes = headers_end + 4 - buf;
+  size_t leftover = total_read - header_bytes;
+
+  req->body = NULL;
+  req->body_len = 0;
+
+  if (leftover > 0) {
+    req->body = malloc(leftover + 1);
+    if (!req->body) {
+      tw_log(TW_ERROR, "Failed to allocate memory for request body");
+      return TW_REQUEST_PARSE_ERROR;
+    }
+    memcpy(req->body, headers_end + 4, leftover);
+    req->body[leftover] = '\0';
+    req->body_len = leftover;
+  }
+
+  return TW_REQUEST_PARSE_SUCCESS;
+}
+
+TWDEF tw_request_parse_result tw_request_parse_body(tw_conn *conn,
+                                                    tw_request *req) {
+  const char *cl_hdr = tw_request_get_header(req, "Content-Length");
+  if (!cl_hdr) {
+    // No body to parse
+    return TW_REQUEST_PARSE_SUCCESS;
+  }
+
+  size_t content_length = strtoul(cl_hdr, NULL, 10);
+  if (content_length == 0) {
+    // Empty body
+    return TW_REQUEST_PARSE_SUCCESS;
+  }
+
+  if (content_length > TW_MAX_REQUEST_BODY) {
+    content_length = TW_MAX_REQUEST_BODY;
+  }
+
+  if (!req->body) {
+    // Allocate memory for the body
+    req->body = (char *)malloc((size_t)content_length + 1);
+    if (!req->body) {
+      tw_log(TW_ERROR, "Failed to allocate memory for request body");
+      return TW_REQUEST_PARSE_ERROR;
+    }
+  } else {
+    char *new_body = realloc(req->body, content_length + 1);
+    if (!new_body) {
+      free(req->body);
+      req->body = NULL;
+      req->body_len = 0;
+      return TW_REQUEST_PARSE_ERROR;
+    }
+    req->body = new_body;
+  }
+
+  size_t total_read = req->body_len;
+  size_t bytes_remaining = content_length - req->body_len;
+
+  while (bytes_remaining > 0) {
+    ssize_t bytes_read =
+        tw_conn_read(conn, req->body + total_read, bytes_remaining);
+    if (bytes_read <= 0) {
+#ifdef _WIN32
+      if (WSAGetLastError() == WSAEWOULDBLOCK) {
+        return TW_REQUEST_PARSE_BLOCK;
+      }
+#else
+      if (errno == EAGAIN || errno == EWOULDBLOCK) {
+        return TW_REQUEST_PARSE_BLOCK;
+      }
+#endif
+      free(req->body);
+      req->body = NULL;
+      return TW_REQUEST_PARSE_ERROR;
+    }
+
+    total_read += bytes_read;
+    bytes_remaining -= bytes_read;
+  }
+
+  req->body[content_length] = '\0';
+  req->body_len = content_length;
+
+  return TW_REQUEST_PARSE_SUCCESS;
 }
 
 TWDEF const char *tw_request_get_header(tw_request *req, const char *name) {
@@ -489,6 +625,14 @@ TWDEF const char *tw_request_get_header(tw_request *req, const char *name) {
     }
   }
   return NULL;
+}
+
+TWDEF void tw_request_free(tw_request *req) {
+  if (req->body) {
+    free(req->body);
+    req->body = NULL;
+    req->body_len = 0;
+  }
 }
 
 TWDEF void tw_response_set_status(tw_response *res, int status_code) {

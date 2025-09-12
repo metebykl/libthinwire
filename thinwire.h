@@ -103,7 +103,7 @@ typedef struct {
 } tw_request;
 
 typedef struct {
-  int status_code;
+  int status;
 
   tw_header headers[TW_MAX_HEADERS];
   size_t header_count;
@@ -136,7 +136,7 @@ TWDEF tw_request_parse_result tw_request_parse_body(tw_conn *conn,
 TWDEF const char *tw_request_get_header(tw_request *req, const char *name);
 TWDEF void tw_request_free(tw_request *req);
 
-TWDEF void tw_response_set_status(tw_response *res, int status_code);
+TWDEF void tw_response_set_status(tw_response *res, int status);
 TWDEF void tw_response_set_header(tw_response *res, const char *name,
                                   const char *value);
 TWDEF void tw_response_set_body(tw_response *res, const char *body,
@@ -299,7 +299,7 @@ TWDEF bool tw_server_run(tw_server *server, tw_request_handler_fn handler) {
 
         if (req_parse_result == TW_REQUEST_PARSE_ERROR) {
           tw_response res = {0};
-          res.status_code = 400;
+          tw_response_set_status(&res, 400);
 
           const char *body = "Bad Request";
           res.body = body;
@@ -316,7 +316,7 @@ TWDEF bool tw_server_run(tw_server *server, tw_request_handler_fn handler) {
         }
 
         tw_response res = {0};
-        res.status_code = 200;
+        tw_response_set_status(&res, 200);
 
         if (req.keep_alive) {
           tw_response_set_header(&res, "Connection", "keep-alive");
@@ -635,8 +635,8 @@ TWDEF void tw_request_free(tw_request *req) {
   }
 }
 
-TWDEF void tw_response_set_status(tw_response *res, int status_code) {
-  res->status_code = status_code;
+TWDEF void tw_response_set_status(tw_response *res, int status) {
+  res->status = status;
 }
 
 TWDEF void tw_response_set_header(tw_response *res, const char *name,
@@ -670,36 +670,92 @@ TWDEF void tw_response_set_header(tw_response *res, const char *name,
   res->header_count++;
 }
 
-static const char *tw_get_status_message(int status_code) {
-  switch (status_code) {
+static const char *tw_status_text(int status) {
+  switch (status) {
     case 100:
       return "Continue";
+    case 101:
+      return "Switching Protocols";
     case 200:
       return "OK";
     case 201:
       return "Created";
+    case 202:
+      return "Accepted";
+    case 203:
+      return "Non-Authoritative Information";
     case 204:
       return "No Content";
+    case 205:
+      return "Reset Content";
+    case 206:
+      return "Partial Content";
+    case 207:
+      return "Multi-Status";
+    case 300:
+      return "Multiple Choices";
     case 301:
       return "Moved Permanently";
     case 302:
       return "Found";
+    case 303:
+      return "See Other";
+    case 304:
+      return "Not Modified";
+    case 307:
+      return "Temporary Redirect";
     case 400:
       return "Bad Request";
     case 401:
       return "Unauthorized";
+    case 402:
+      return "Payment Required";
     case 403:
       return "Forbidden";
     case 404:
       return "Not Found";
+    case 405:
+      return "Method Not Allowed";
+    case 406:
+      return "Not Acceptable";
+    case 407:
+      return "Proxy Authentication Required";
+    case 408:
+      return "Request Timeout";
+    case 409:
+      return "Conflict";
+    case 410:
+      return "Gone";
+    case 411:
+      return "Length Required";
+    case 412:
+      return "Precondition Failed";
+    case 413:
+      return "Content Too Large";
+    case 414:
+      return "URI Too Long";
+    case 415:
+      return "Unsupported Media Type";
+    case 416:
+      return "Range Not Satisfiable";
+    case 417:
+      return "Expectation Failed";
+    case 421:
+      return "Misdirected Request";
     case 500:
       return "Internal Server Error";
+    case 501:
+      return "Not Implemented";
     case 502:
       return "Bad Gateway";
     case 503:
       return "Service Unavailable";
+    case 504:
+      return "Gateway Timeout";
+    case 505:
+      return "HTTP Version Not Supported";
     default:
-      return "Unknown Status";
+      return "";
   }
 }
 
@@ -713,9 +769,9 @@ TWDEF bool tw_response_send(tw_conn *conn, tw_response *res) {
   char header_buf[TW_MAX_HEADER_VALUE * 2];
   int offset = 0;
 
-  const char *status_message = tw_get_status_message(res->status_code);
+  const char *status_text = tw_status_text(res->status);
   offset += snprintf(header_buf + offset, sizeof(header_buf) - offset,
-                     "HTTP/1.1 %d %s\r\n", res->status_code, status_message);
+                     "HTTP/1.1 %d %s\r\n", res->status, status_text);
 
   offset += snprintf(header_buf + offset, sizeof(header_buf) - offset,
                      "Content-Length: %zu\r\n", res->body_len);

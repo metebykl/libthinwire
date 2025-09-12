@@ -105,11 +105,11 @@ typedef struct {
 typedef struct {
   int status_code;
 
-  const char *body;
-  size_t body_len;
-
   tw_header headers[TW_MAX_HEADERS];
   size_t header_count;
+
+  const char *body;
+  size_t body_len;
 } tw_response;
 
 typedef void (*tw_request_handler_fn)(tw_conn *conn, tw_request *req,
@@ -310,7 +310,7 @@ TWDEF bool tw_server_run(tw_server *server, tw_request_handler_fn handler) {
           keep_alive = false;
           break;
         } else if (req_parse_result == TW_REQUEST_PARSE_BLOCK) {
-          // No data available yet
+          /* no data available yet */
           keep_alive = false;
           break;
         }
@@ -446,7 +446,7 @@ TWDEF tw_request_parse_result tw_request_parse(tw_conn *conn, tw_request *req) {
   }
 
   if (!headers_end) {
-    // Headers too large or malformed
+    /* headers too large or malformed */
     return TW_REQUEST_PARSE_ERROR;
   }
 
@@ -527,7 +527,7 @@ TWDEF tw_request_parse_result tw_request_parse(tw_conn *conn, tw_request *req) {
       req->keep_alive = true;
     }
   } else if (strcmp(req->version, "HTTP/1.1") == 0) {
-    // HTTP/1.1 defaults to keep-alive
+    /* HTTP/1.1 defaults to keep-alive */
     req->keep_alive = true;
   }
 
@@ -555,13 +555,13 @@ TWDEF tw_request_parse_result tw_request_parse_body(tw_conn *conn,
                                                     tw_request *req) {
   const char *cl_hdr = tw_request_get_header(req, "Content-Length");
   if (!cl_hdr) {
-    // No body to parse
+    /* no body to parse */
     return TW_REQUEST_PARSE_SUCCESS;
   }
 
   size_t content_length = strtoul(cl_hdr, NULL, 10);
   if (content_length == 0) {
-    // Empty body
+    /* empty body */
     return TW_REQUEST_PARSE_SUCCESS;
   }
 
@@ -570,7 +570,7 @@ TWDEF tw_request_parse_result tw_request_parse_body(tw_conn *conn,
   }
 
   if (!req->body) {
-    // Allocate memory for the body
+    /* allocate memory for the body */
     req->body = (char *)malloc((size_t)content_length + 1);
     if (!req->body) {
       tw_log(TW_ERROR, "Failed to allocate memory for request body");

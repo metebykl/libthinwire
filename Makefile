@@ -1,7 +1,11 @@
 CFLAGS=-Wall -Wextra
 
 .PHONY: all
-all: examples
+all: tests examples
+
+.PHONY: tests
+tests: 
+	$(MAKE) -C tests/
 
 .PHONY: examples
 examples: 

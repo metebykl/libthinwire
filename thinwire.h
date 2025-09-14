@@ -36,6 +36,21 @@ typedef enum { TW_INFO, TW_WARNING, TW_ERROR } tw_log_level;
 
 TWDEF void tw_log(tw_log_level level, const char *fmt, ...);
 
+typedef struct {
+  char **keys;
+  char **values;
+  size_t capacity;
+  size_t size;
+} tw_map;
+
+TWDEF bool tw_map_init(tw_map *map);
+TWDEF void tw_map_free(tw_map *map);
+TWDEF bool tw_map_set(tw_map *map, const char *key, const char *value);
+TWDEF const char *tw_map_get(tw_map *map, const char *key);
+TWDEF bool tw_map_remove(tw_map *map, const char *key);
+TWDEF bool tw_map_remove_at(tw_map *map, size_t index);
+TWDEF bool tw_map_empty(tw_map *map);
+
 #ifndef TW_DEFAULT_PORT
 #define TW_DEFAULT_PORT 8080
 #endif
@@ -174,6 +189,138 @@ TWDEF void tw_log(tw_log_level level, const char *fmt, ...) {
   vfprintf(stream, fmt, args);
   va_end(args);
   fprintf(stream, "\n");
+}
+
+TWDEF bool tw_map_init(tw_map *map) {
+  map->values = NULL;
+  map->keys = (char **)malloc(sizeof(char *));
+  if (map->keys == NULL) {
+    tw_log(TW_ERROR, "Failed to allocate memory for tw_map->keys");
+    return false;
+  }
+  map->keys[0] = NULL;
+
+  map->values = (char **)malloc(sizeof(char *));
+  if (map->values == NULL) {
+    tw_log(TW_ERROR, "Failed to allocate memory for tw_map->values");
+    free(map->keys);
+    map->keys = NULL;
+    return false;
+  }
+  map->values[0] = NULL;
+
+  map->capacity = sizeof(char *);
+  map->size = 0;
+
+  return true;
+}
+
+TWDEF void tw_map_free(tw_map *map) {
+  for (size_t i = 0; i < map->size; i++) {
+    free(map->keys[i]);
+    free(map->values[i]);
+  }
+
+  free(map->keys);
+  free(map->values);
+  map->keys = NULL;
+  map->values = NULL;
+  map->capacity = 0;
+  map->size = 0;
+}
+
+TWDEF bool tw_map_set(tw_map *map, const char *key, const char *value) {
+  for (size_t i = 0; i < map->size; i++) {
+    if (strcmp(map->keys[i], key) == 0) {
+      char *dup_value = strdup(value);
+      if (dup_value == NULL) {
+        tw_log(TW_ERROR, "Failed to allocate memory for tw_map->values");
+        return false;
+      }
+
+      free(map->values[i]);
+      map->values[i] = dup_value;
+      return false;
+    }
+  }
+
+  if (map->size >= map->capacity) {
+    size_t new_capacity = map->capacity * 2;
+    map->keys = (char **)realloc(map->keys, new_capacity * sizeof(char *));
+    if (map->keys == NULL) {
+      tw_log(TW_ERROR, "Failed to allocate memory for tw_map->keys");
+      return false;
+    }
+    map->values = (char **)realloc(map->values, new_capacity * sizeof(char *));
+    if (map->values == NULL) {
+      tw_log(TW_ERROR, "Failed to allocate memory for tw_map->values");
+      return false;
+    }
+    map->capacity = new_capacity;
+  }
+
+  map->keys[map->size] = strdup(key);
+  if (map->keys[map->size] == NULL) {
+    tw_log(TW_ERROR, "Failed to allocate memory for tw_map->keys");
+    return false;
+  }
+  map->values[map->size] = strdup(value);
+  if (map->values[map->size] == NULL) {
+    tw_log(TW_ERROR, "Failed to allocate memory for tw_map->values");
+    return false;
+  }
+
+  map->size++;
+  return true;
+}
+
+TWDEF const char *tw_map_get(tw_map *map, const char *key) {
+  for (size_t i = 0; i < map->size; i++) {
+    if (strcmp(map->keys[i], key) == 0) {
+      return map->values[i];
+    }
+  }
+
+  return NULL;
+}
+
+TWDEF bool tw_map_remove(tw_map *map, const char *key) {
+  for (size_t i = 0; i < map->size; i++) {
+    if (strcmp(map->keys[i], key) == 0) {
+      return tw_map_remove_at(map, i);
+    }
+  }
+
+  return false;
+}
+
+TWDEF bool tw_map_remove_at(tw_map *map, size_t index) {
+  free(map->keys[index]);
+  free(map->values[index]);
+
+  for (size_t i = index; i < map->size; i++) {
+    map->keys[i] = map->keys[i + 1];
+    map->values[i] = map->values[i + 1];
+  }
+
+  map->keys = (char **)realloc(map->keys, map->size * sizeof(char *));
+  if (map->keys[map->size] == NULL) {
+    tw_log(TW_ERROR, "Failed to allocate memory for tw_map->keys");
+    return false;
+  }
+  map->values = (char **)realloc(map->values, map->size * sizeof(char *));
+  if (map->values[map->size] == NULL) {
+    tw_log(TW_ERROR, "Failed to allocate memory for tw_map->values");
+    return false;
+  }
+
+  map->size--;
+  return true;
+}
+
+TWDEF bool tw_map_empty(tw_map *map) {
+  tw_map_free(map);
+  return tw_map_init(map);
 }
 
 TWDEF bool tw_server_init(tw_server *server, int port) {

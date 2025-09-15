@@ -1,25 +1,53 @@
 #include <assert.h>
 
+#include "test.h"
+
 #define THINWIRE_IMPL
 #include "../thinwire.h"
 
-int main(void) {
+static int test_map_get_and_set(void) {
+  TEST_BEGIN();
+
   tw_map map;
-  assert(tw_map_init(&map));
+  ASSERT(tw_map_init(&map));
 
-  /* tests for tw_map_set & tw_map_get */
-  assert(tw_map_set(&map, "foo", "bar"));
-  assert(!strcmp(tw_map_get(&map, "foo"), "bar"));
-  assert(tw_map_get(&map, "baz") == NULL);
+  ASSERT(tw_map_set(&map, "foo", "bar"));
+  ASSERT(!strcmp(tw_map_get(&map, "foo"), "bar"));
+  ASSERT(tw_map_get(&map, "baz") == NULL);
 
-  /* tests for tw_map_remove */
-  assert(tw_map_remove(&map, "foo"));
-  assert(!tw_map_remove(&map, "baz"));
+  TEST_END();
+}
 
-  /* tests for tw_map_empty */
-  assert(tw_map_set(&map, "hello", "world"));
-  assert(tw_map_empty(&map));
-  assert(tw_map_get(&map, "hello") == NULL);
+static int test_map_remove(void) {
+  TEST_BEGIN();
 
-  return 0;
+  tw_map map;
+  ASSERT(tw_map_init(&map));
+
+  ASSERT(tw_map_set(&map, "foo", "bar"));
+  ASSERT(tw_map_remove(&map, "foo"));
+  ASSERT(!tw_map_remove(&map, "baz"));
+
+  TEST_END();
+}
+
+static int test_map_empty(void) {
+  TEST_BEGIN();
+
+  tw_map map;
+  ASSERT(tw_map_init(&map));
+
+  ASSERT(tw_map_set(&map, "hello", "world"));
+  ASSERT(tw_map_empty(&map));
+  ASSERT(tw_map_get(&map, "hello") == NULL);
+
+  TEST_END();
+}
+
+int main(void) {
+  RUN_TEST(test_map_get_and_set);
+  RUN_TEST(test_map_remove);
+  RUN_TEST(test_map_empty);
+
+  return test_summary();
 }

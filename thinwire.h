@@ -108,8 +108,7 @@ typedef struct {
   char path[1024];
   size_t path_len;
 
-  tw_header headers[TW_MAX_HEADERS];
-  size_t header_count;
+  tw_map headers;
 
   bool keep_alive;
 
@@ -120,10 +119,9 @@ typedef struct {
 typedef struct {
   int status;
 
-  tw_header headers[TW_MAX_HEADERS];
-  size_t header_count;
+  tw_map headers;
 
-  const char *body;
+  char *body;
   size_t body_len;
 } tw_response;
 
@@ -145,16 +143,19 @@ typedef enum {
   TW_REQUEST_PARSE_BLOCK = 2
 } tw_request_parse_result;
 
+TWDEF bool tw_request_init(tw_request *req);
+TWDEF void tw_request_free(tw_request *req);
 TWDEF tw_request_parse_result tw_request_parse(tw_conn *conn, tw_request *req);
 TWDEF tw_request_parse_result tw_request_parse_body(tw_conn *conn,
                                                     tw_request *req);
 TWDEF const char *tw_request_get_header(tw_request *req, const char *name);
-TWDEF void tw_request_free(tw_request *req);
 
+TWDEF bool tw_response_init(tw_response *res);
+TWDEF void tw_response_free(tw_response *res);
 TWDEF void tw_response_set_status(tw_response *res, int status);
 TWDEF void tw_response_set_header(tw_response *res, const char *name,
                                   const char *value);
-TWDEF void tw_response_set_body(tw_response *res, const char *body,
+TWDEF bool tw_response_set_body(tw_response *res, const char *body,
                                 size_t body_len);
 TWDEF bool tw_response_send(tw_conn *conn, tw_response *res);
 
@@ -209,7 +210,7 @@ TWDEF bool tw_map_init(tw_map *map) {
   }
   map->values[0] = NULL;
 
-  map->capacity = sizeof(char *);
+  map->capacity = 1;
   map->size = 0;
 
   return true;
@@ -240,22 +241,28 @@ TWDEF bool tw_map_set(tw_map *map, const char *key, const char *value) {
 
       free(map->values[i]);
       map->values[i] = dup_value;
-      return false;
+      return true;
     }
   }
 
   if (map->size >= map->capacity) {
     size_t new_capacity = map->capacity * 2;
-    map->keys = (char **)realloc(map->keys, new_capacity * sizeof(char *));
-    if (map->keys == NULL) {
+    char **new_keys =
+        (char **)realloc(map->keys, new_capacity * sizeof(char *));
+    if (new_keys == NULL) {
       tw_log(TW_ERROR, "Failed to allocate memory for tw_map->keys");
       return false;
     }
-    map->values = (char **)realloc(map->values, new_capacity * sizeof(char *));
-    if (map->values == NULL) {
+    map->keys = new_keys;
+
+    char **new_values =
+        (char **)realloc(map->values, new_capacity * sizeof(char *));
+    if (new_values == NULL) {
       tw_log(TW_ERROR, "Failed to allocate memory for tw_map->values");
       return false;
     }
+    map->values = new_values;
+
     map->capacity = new_capacity;
   }
 
@@ -267,6 +274,7 @@ TWDEF bool tw_map_set(tw_map *map, const char *key, const char *value) {
   map->values[map->size] = strdup(value);
   if (map->values[map->size] == NULL) {
     tw_log(TW_ERROR, "Failed to allocate memory for tw_map->values");
+    free(map->keys[map->size]);
     return false;
   }
 
@@ -303,18 +311,25 @@ TWDEF bool tw_map_remove_at(tw_map *map, size_t index) {
     map->values[i] = map->values[i + 1];
   }
 
-  map->keys = (char **)realloc(map->keys, map->size * sizeof(char *));
-  if (map->keys[map->size] == NULL) {
-    tw_log(TW_ERROR, "Failed to allocate memory for tw_map->keys");
-    return false;
-  }
-  map->values = (char **)realloc(map->values, map->size * sizeof(char *));
-  if (map->values[map->size] == NULL) {
-    tw_log(TW_ERROR, "Failed to allocate memory for tw_map->values");
-    return false;
+  map->size--;
+
+  if (map->size > 0) {
+    char **new_keys = (char **)realloc(map->keys, map->size * sizeof(char *));
+    if (new_keys == NULL) {
+      tw_log(TW_ERROR, "Failed to allocate memory for tw_map->keys");
+      return false;
+    }
+    map->keys = new_keys;
+
+    char **new_values =
+        (char **)realloc(map->values, map->size * sizeof(char *));
+    if (new_values == NULL) {
+      tw_log(TW_ERROR, "Failed to allocate memory for tw_map->values");
+      return false;
+    }
+    map->values = new_values;
   }
 
-  map->size--;
   return true;
 }
 
@@ -442,28 +457,41 @@ TWDEF bool tw_server_run(tw_server *server, tw_request_handler_fn handler) {
       bool keep_alive = true;
       while (keep_alive) {
         tw_request req;
+        if (!tw_request_init(&req)) {
+          keep_alive = false;
+          break;
+        };
+
         tw_request_parse_result req_parse_result = tw_request_parse(conn, &req);
-
         if (req_parse_result == TW_REQUEST_PARSE_ERROR) {
-          tw_response res = {0};
-          tw_response_set_status(&res, 400);
+          tw_response res;
+          if (!tw_response_init(&res)) {
+            keep_alive = false;
+            break;
+          };
 
+          tw_response_set_status(&res, 400);
           const char *body = "Bad Request";
-          res.body = body;
-          res.body_len = strlen(body);
+          tw_response_set_body(&res, body, strlen(body));
 
           tw_response_send(conn, &res);
           tw_request_free(&req);
+          tw_response_free(&res);
           keep_alive = false;
           break;
         } else if (req_parse_result == TW_REQUEST_PARSE_BLOCK) {
           /* no data available yet */
+          tw_request_free(&req);
           keep_alive = false;
           break;
         }
 
-        tw_response res = {0};
-        tw_response_set_status(&res, 200);
+        tw_response res;
+        if (!tw_response_init(&res)) {
+          tw_request_free(&req);
+          keep_alive = false;
+          break;
+        };
 
         if (req.keep_alive) {
           tw_response_set_header(&res, "Connection", "keep-alive");
@@ -475,6 +503,7 @@ TWDEF bool tw_server_run(tw_server *server, tw_request_handler_fn handler) {
         handler(conn, &req, &res);
 
         tw_request_free(&req);
+        tw_response_free(&res);
 
         if (!keep_alive) {
           tw_conn_close(conn);
@@ -561,6 +590,27 @@ TWDEF ssize_t tw_conn_write(tw_conn *conn, const char *buf, size_t len) {
 
 TWDEF void tw_conn_close(tw_conn *conn) { close(conn->fd); };
 
+TWDEF bool tw_request_init(tw_request *req) {
+  if (req != NULL) {
+    tw_map_init(&req->headers);
+    req->keep_alive = false;
+    req->body = NULL;
+    req->body_len = 0;
+    return true;
+  } else {
+    return false;
+  }
+}
+
+TWDEF void tw_request_free(tw_request *req) {
+  if (req != NULL) {
+    free(req->body);
+    tw_map_free(&req->headers);
+    req->body = NULL;
+    req->body_len = 0;
+  }
+}
+
 TWDEF tw_request_parse_result tw_request_parse(tw_conn *conn, tw_request *req) {
   char buf[TW_MAX_REQUEST_SIZE];
   ssize_t bytes_read = 0;
@@ -639,17 +689,15 @@ TWDEF tw_request_parse_result tw_request_parse(tw_conn *conn, tw_request *req) {
 
   pos = version_end + 2;
 
-  req->header_count = 0;
   while (*pos && !(pos[0] == '\r' && pos[1] == '\n')) {
-    if (req->header_count >= TW_MAX_HEADERS) return TW_REQUEST_PARSE_ERROR;
-
     const char *colon = strchr(pos, ':');
     if (!colon) return TW_REQUEST_PARSE_ERROR;
 
     size_t name_len = (size_t)(colon - pos);
     if (name_len >= TW_MAX_HEADER_NAME) return TW_REQUEST_PARSE_ERROR;
-    memcpy(req->headers[req->header_count].name, pos, name_len);
-    req->headers[req->header_count].name[name_len] = '\0';
+    char name[TW_MAX_HEADER_NAME];
+    memcpy(name, pos, name_len);
+    name[name_len] = '\0';
 
     const char *value_start = colon + 1;
     while (*value_start == ' ') value_start++;
@@ -659,10 +707,11 @@ TWDEF tw_request_parse_result tw_request_parse(tw_conn *conn, tw_request *req) {
 
     size_t value_len = (size_t)(line_end - value_start);
     if (value_len >= TW_MAX_HEADER_VALUE) return TW_REQUEST_PARSE_ERROR;
-    memcpy(req->headers[req->header_count].value, value_start, value_len);
-    req->headers[req->header_count].value[value_len] = '\0';
+    char value[TW_MAX_HEADER_VALUE];
+    memcpy(value, value_start, value_len);
+    value[value_len] = '\0';
 
-    req->header_count++;
+    tw_map_set(&req->headers, name, value);
     pos = line_end + 2;
   }
 
@@ -766,19 +815,27 @@ TWDEF tw_request_parse_result tw_request_parse_body(tw_conn *conn,
 }
 
 TWDEF const char *tw_request_get_header(tw_request *req, const char *name) {
-  for (size_t i = 0; i < req->header_count; i++) {
-    if (strcasecmp(req->headers[i].name, name) == 0) {
-      return req->headers[i].value;
-    }
-  }
-  return NULL;
+  return tw_map_get(&req->headers, name);
 }
 
-TWDEF void tw_request_free(tw_request *req) {
-  if (req->body) {
-    free(req->body);
-    req->body = NULL;
-    req->body_len = 0;
+TWDEF bool tw_response_init(tw_response *res) {
+  if (res != NULL) {
+    tw_map_init(&res->headers);
+    res->status = 200;
+    res->body = NULL;
+    res->body_len = 0;
+    return true;
+  } else {
+    return false;
+  }
+}
+
+TWDEF void tw_response_free(tw_response *res) {
+  if (res != NULL) {
+    free(res->body);
+    tw_map_free(&res->headers);
+    res->body = NULL;
+    res->body_len = 0;
   }
 }
 
@@ -788,11 +845,6 @@ TWDEF void tw_response_set_status(tw_response *res, int status) {
 
 TWDEF void tw_response_set_header(tw_response *res, const char *name,
                                   const char *value) {
-  if (res->header_count >= TW_MAX_HEADERS) {
-    tw_log(TW_WARNING, "Cannot set header, max headers reached.");
-    return;
-  }
-
   size_t name_len = strlen(name);
   if (name_len >= TW_MAX_HEADER_NAME) {
     tw_log(TW_WARNING, "Header name too long.");
@@ -805,16 +857,7 @@ TWDEF void tw_response_set_header(tw_response *res, const char *name,
     return;
   }
 
-  for (size_t i = 0; i < res->header_count; i++) {
-    if (strcasecmp(res->headers[i].name, name) == 0) {
-      strcpy(res->headers[i].value, value);
-      return;
-    }
-  }
-
-  strcpy(res->headers[res->header_count].name, name);
-  strcpy(res->headers[res->header_count].value, value);
-  res->header_count++;
+  tw_map_set(&res->headers, name, value);
 }
 
 static const char *tw_status_text(int status) {
@@ -906,10 +949,24 @@ static const char *tw_status_text(int status) {
   }
 }
 
-TWDEF void tw_response_set_body(tw_response *res, const char *body,
+TWDEF bool tw_response_set_body(tw_response *res, const char *body,
                                 size_t body_len) {
-  res->body = body;
-  res->body_len = body_len;
+  if (res != NULL && body != NULL) {
+    free(res->body);
+    res->body = (char *)malloc(body_len + 1);
+    if (res->body == NULL) {
+      tw_log(TW_ERROR, "Failed to allocate memory for tw_response->body");
+      return false;
+    }
+
+    memcpy(res->body, body, body_len);
+    res->body[body_len] = '\0';
+    res->body_len = body_len;
+
+    return true;
+  } else {
+    return false;
+  }
 }
 
 TWDEF bool tw_response_send(tw_conn *conn, tw_response *res) {
@@ -923,10 +980,10 @@ TWDEF bool tw_response_send(tw_conn *conn, tw_response *res) {
   offset += snprintf(header_buf + offset, sizeof(header_buf) - offset,
                      "Content-Length: %zu\r\n", res->body_len);
 
-  for (size_t i = 0; i < res->header_count; i++) {
+  for (size_t i = 0; i < res->headers.size; i++) {
     offset +=
         snprintf(header_buf + offset, sizeof(header_buf) - offset, "%s: %s\r\n",
-                 res->headers[i].name, res->headers[i].value);
+                 res->headers.keys[i], res->headers.values[i]);
   }
 
   offset += snprintf(header_buf + offset, sizeof(header_buf) - offset, "\r\n");
